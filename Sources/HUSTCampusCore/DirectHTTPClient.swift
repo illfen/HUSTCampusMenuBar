@@ -1,22 +1,17 @@
 import Foundation
+#if canImport(Network)
 import Network
+#endif
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
-/// URLSession delegate that prevents automatic redirect following for GET probes
-/// and binds connections to the physical WiFi interface to bypass TUN/VPN
-private final class WiFiDirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    static let shared = WiFiDirectDelegate()
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        // 不跟随重定向，直接返回 nil 停止
-        completionHandler(nil)
-    }
-}
+// MARK: - Cross-platform HTTP Client
 
 public final class DirectHTTPClient: Sendable {
     public let session: URLSession
@@ -28,22 +23,23 @@ public final class DirectHTTPClient: Sendable {
         configuration.timeoutIntervalForResource = 12
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
-        // 禁用 HTTP 代理
+        #if os(macOS)
         configuration.connectionProxyDictionary = [
             kCFNetworkProxiesHTTPEnable as String: false,
             kCFNetworkProxiesHTTPSEnable as String: false
         ]
-        // 强制走 WiFi 物理接口，绕过 TUN/VPN
-        self.session = URLSession(configuration: configuration, delegate: WiFiDirectDelegate.shared, delegateQueue: nil)
+        self.session = URLSession(configuration: configuration, delegate: NoRedirectDelegate.shared, delegateQueue: nil)
+        #else
+        self.session = URLSession(configuration: configuration, delegate: NoRedirectDelegate.shared, delegateQueue: nil)
+        #endif
     }
 
     public func get(_ url: URL, timeout: TimeInterval = 8) async throws -> (Data, URLResponse) {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.assumesHTTP3Capable = false
         request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X) HUSTCampusMenuBar/0.1",
+            "Mozilla/5.0 (compatible; HUSTCampusAutologin/0.1)",
             forHTTPHeaderField: "User-Agent"
         )
         return try await session.data(for: request)
@@ -59,7 +55,6 @@ public final class DirectHTTPClient: Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.assumesHTTP3Capable = false
         request.httpBody = FormEncoding.encode(fields)
         request.setValue(
             "application/x-www-form-urlencoded; charset=UTF-8",
@@ -67,7 +62,7 @@ public final class DirectHTTPClient: Sendable {
         )
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X) HUSTCampusMenuBar/0.1",
+            "Mozilla/5.0 (compatible; HUSTCampusAutologin/0.1)",
             forHTTPHeaderField: "User-Agent"
         )
         for (key, value) in headers {
@@ -76,8 +71,9 @@ public final class DirectHTTPClient: Sendable {
         return try await session.data(for: request)
     }
 
-    /// 使用 Network.framework 直接通过物理 WiFi 接口发送 HTTP 请求
-    /// 这是绕过 TUN/VPN 的最可靠方式
+    // MARK: - Raw TCP methods (cross-platform)
+
+    /// 发送 HTTP GET 请求，macOS 上绑定 WiFi 物理接口绕过 TUN，Linux 上直连
     public func getRaw(_ url: URL, timeout: TimeInterval = 8) async throws -> (Data, HTTPURLResponse) {
         guard let host = url.host, let scheme = url.scheme else {
             throw AutologinError.invalidPortalURL(url.absoluteString)
@@ -86,18 +82,10 @@ public final class DirectHTTPClient: Sendable {
         let path = url.path.isEmpty ? "/" : url.path
         let query = url.query.map { "?\($0)" } ?? ""
 
-        let requestString = """
-        GET \(path)\(query) HTTP/1.1\r
-        Host: \(host)\r
-        User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X) HUSTCampusMenuBar/0.1\r
-        Accept: */*\r
-        Connection: close\r
-        \r
-
-        """
+        let requestString = "GET \(path)\(query) HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: Mozilla/5.0 (compatible; HUSTCampusAutologin/0.1)\r\nAccept: */*\r\nConnection: close\r\n\r\n"
 
         let data = try await sendRawTCP(host: host, port: UInt16(port), payload: Data(requestString.utf8), timeout: timeout)
-        return try parseHTTPResponse(data)
+        return try parseHTTPResponse(data, originalURL: url)
     }
 
     public func postFormRaw(
@@ -114,40 +102,30 @@ public final class DirectHTTPClient: Sendable {
         let query = url.query.map { "?\($0)" } ?? ""
         let body = FormEncoding.encode(fields)
 
-        var headerLines = """
-        POST \(path)\(query) HTTP/1.1\r
-        Host: \(host)\r
-        User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X) HUSTCampusMenuBar/0.1\r
-        Accept: */*\r
-        Content-Type: application/x-www-form-urlencoded; charset=UTF-8\r
-        Content-Length: \(body.count)\r
-
-        """
+        var headerStr = "POST \(path)\(query) HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: Mozilla/5.0 (compatible; HUSTCampusAutologin/0.1)\r\nAccept: */*\r\nContent-Type: application/x-www-form-urlencoded; charset=UTF-8\r\nContent-Length: \(body.count)\r\n"
         for (key, value) in headers {
-            headerLines += "\(key): \(value)\r\n"
+            headerStr += "\(key): \(value)\r\n"
         }
-        headerLines += "Connection: close\r\n"
-        headerLines += "\r\n"
+        headerStr += "Connection: close\r\n\r\n"
 
-        var payload = Data(headerLines.utf8)
+        var payload = Data(headerStr.utf8)
         payload.append(body)
 
         let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout)
-        return try parseHTTPResponse(data)
+        return try parseHTTPResponse(data, originalURL: url)
     }
 
-    /// 通过 Network.framework 建立 TCP 连接，绑定到 WiFi 物理接口
+    // MARK: - Platform-specific raw TCP
+
+    #if canImport(Network)
     private func sendRawTCP(host: String, port: UInt16, payload: Data, timeout: TimeInterval) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             let parameters = NWParameters.tcp
-            // 强制使用 WiFi 物理接口，绕过 utun (VPN/TUN)
             parameters.requiredInterfaceType = .wifi
 
             let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: parameters)
+            let queue = DispatchQueue(label: "com.jzy.HUSTCampus.rawhttp")
 
-            let queue = DispatchQueue(label: "com.jzy.HUSTCampusMenuBar.rawhttp")
-
-            // 使用 class 包装可变状态以满足 Sendable 要求
             final class State: @unchecked Sendable {
                 var completed = false
                 var timeoutItem: DispatchWorkItem?
@@ -207,9 +185,7 @@ public final class DirectHTTPClient: Sendable {
     private func receiveAll(connection: NWConnection, accumulated: Data = Data(), completion: @escaping @Sendable (Result<Data, Error>) -> Void) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { content, _, isComplete, error in
             var data = accumulated
-            if let content = content {
-                data.append(content)
-            }
+            if let content = content { data.append(content) }
             if isComplete || error != nil {
                 if data.isEmpty, let error = error {
                     completion(.failure(error))
@@ -222,7 +198,79 @@ public final class DirectHTTPClient: Sendable {
         }
     }
 
-    private func parseHTTPResponse(_ data: Data) throws -> (Data, HTTPURLResponse) {
+    #else
+    // Linux: 使用 POSIX socket 直连
+    private func sendRawTCP(host: String, port: UInt16, payload: Data, timeout: TimeInterval) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().async {
+                do {
+                    let data = try Self.posixTCPRequest(host: host, port: port, payload: payload, timeout: timeout)
+                    continuation.resume(returning: data)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private static func posixTCPRequest(host: String, port: UInt16, payload: Data, timeout: TimeInterval) throws -> Data {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = Int32(SOCK_STREAM)
+        hints.ai_protocol = Int32(IPPROTO_TCP)
+
+        var result: UnsafeMutablePointer<addrinfo>?
+        let portStr = String(port)
+        let status = getaddrinfo(host, portStr, &hints, &result)
+        guard status == 0, let addrInfo = result else {
+            throw AutologinError.requestFailed("DNS 解析失败: \(host)")
+        }
+        defer { freeaddrinfo(result) }
+
+        let sock = socket(addrInfo.pointee.ai_family, addrInfo.pointee.ai_socktype, addrInfo.pointee.ai_protocol)
+        guard sock >= 0 else {
+            throw AutologinError.requestFailed("创建 socket 失败")
+        }
+        defer { close(sock) }
+
+        // 设置超时
+        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        let connectResult = connect(sock, addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen)
+        guard connectResult == 0 else {
+            throw AutologinError.requestFailed("连接失败: \(host):\(port)")
+        }
+
+        // 发送
+        let sent = payload.withUnsafeBytes { buffer in
+            send(sock, buffer.baseAddress, buffer.count, 0)
+        }
+        guard sent == payload.count else {
+            throw AutologinError.requestFailed("发送数据失败")
+        }
+
+        // 接收
+        var responseData = Data()
+        let bufferSize = 65536
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        while true {
+            let received = recv(sock, &buffer, bufferSize, 0)
+            if received <= 0 { break }
+            responseData.append(contentsOf: buffer[0..<received])
+        }
+
+        guard !responseData.isEmpty else {
+            throw AutologinError.requestFailed("服务器无响应")
+        }
+        return responseData
+    }
+    #endif
+
+    // MARK: - HTTP Response Parser
+
+    private func parseHTTPResponse(_ data: Data, originalURL: URL) throws -> (Data, HTTPURLResponse) {
         guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
             throw AutologinError.invalidResponse("无法解码响应")
         }
@@ -237,7 +285,6 @@ public final class DirectHTTPClient: Sendable {
         guard let statusLine = lines.first else {
             throw AutologinError.invalidResponse("空响应")
         }
-        // 解析 "HTTP/1.1 200 OK"
         let parts = statusLine.split(separator: " ", maxSplits: 2)
         guard parts.count >= 2, let statusCode = Int(parts[1]) else {
             throw AutologinError.invalidResponse("无法解析状态码: \(statusLine)")
@@ -253,11 +300,27 @@ public final class DirectHTTPClient: Sendable {
         }
 
         let response = HTTPURLResponse(
-            url: URL(string: "http://placeholder")!,
+            url: originalURL,
             statusCode: statusCode,
             httpVersion: "HTTP/1.1",
             headerFields: headerFields
         )!
         return (bodyData, response)
+    }
+}
+
+// MARK: - No-redirect delegate
+
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = NoRedirectDelegate()
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }

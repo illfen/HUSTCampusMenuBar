@@ -1,0 +1,13 @@
+[Unit]
+Description=HUST Campus Network Auto-Login
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hust-autologin watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -99,8 +99,16 @@ public final class NetworkProbe: Sendable {
     }
 
     private func probeLog(_ message: String) {
-        let logDir = FileManager.default.homeDirectoryForCurrentUser
+        let logDir: URL
+        #if os(macOS)
+        logDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/HUSTCampusMenuBar", isDirectory: true)
+        #else
+        let xdgState = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+            ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/.local/state")
+        logDir = URL(fileURLWithPath: xdgState).appendingPathComponent("hust-autologin", isDirectory: true)
+        #endif
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
         let logURL = logDir.appendingPathComponent("probe-debug.log")
         let formatter = ISO8601DateFormatter()
         formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")

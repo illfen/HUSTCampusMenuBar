@@ -2,6 +2,18 @@
 
 import PackageDescription
 
+#if os(macOS)
+let coreLinkerSettings: [LinkerSetting] = [
+    .linkedFramework("Network")
+]
+let menuBarLinkerSettings: [LinkerSetting] = [
+    .linkedFramework("AppKit")
+]
+#else
+let coreLinkerSettings: [LinkerSetting] = []
+let menuBarLinkerSettings: [LinkerSetting] = []
+#endif
+
 let package = Package(
     name: "HUSTCampusMenuBar",
     platforms: [
@@ -15,10 +27,15 @@ let package = Package(
         .executable(
             name: "HUSTCampusMenuBar",
             targets: ["HUSTCampusMenuBar"]
+        ),
+        .executable(
+            name: "hust-autologin",
+            targets: ["HUSTCampusCLI"]
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/attaswift/BigInt.git", from: "5.4.0")
+        .package(url: "https://github.com/attaswift/BigInt.git", from: "5.4.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
     ],
     targets: [
         .target(
@@ -26,15 +43,18 @@ let package = Package(
             dependencies: [
                 .product(name: "BigInt", package: "BigInt")
             ],
-            linkerSettings: [
-                .linkedFramework("Network")
-            ]
+            linkerSettings: coreLinkerSettings
         ),
         .executableTarget(
             name: "HUSTCampusMenuBar",
             dependencies: ["HUSTCampusCore"],
-            linkerSettings: [
-                .linkedFramework("AppKit")
+            linkerSettings: menuBarLinkerSettings
+        ),
+        .executableTarget(
+            name: "HUSTCampusCLI",
+            dependencies: [
+                "HUSTCampusCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         ),
         .testTarget(
