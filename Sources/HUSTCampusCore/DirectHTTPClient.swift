@@ -73,7 +73,7 @@ public final class DirectHTTPClient: Sendable {
 
     // MARK: - Raw TCP methods (cross-platform)
 
-    /// 发送 HTTP GET 请求，macOS 上绑定 WiFi 物理接口绕过 TUN，Linux 上直连
+    /// 发送 HTTP GET 请求，macOS 上先尝试 WiFi 物理接口绕过 TUN，失败后 fallback 到默认接口
     public func getRaw(_ url: URL, timeout: TimeInterval = 8) async throws -> (Data, HTTPURLResponse) {
         guard let host = url.host, let scheme = url.scheme else {
             throw AutologinError.invalidPortalURL(url.absoluteString)
@@ -83,9 +83,21 @@ public final class DirectHTTPClient: Sendable {
         let query = url.query.map { "?\($0)" } ?? ""
 
         let requestString = "GET \(path)\(query) HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: Mozilla/5.0 (compatible; HUSTCampusAutologin/0.1)\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        let payload = Data(requestString.utf8)
 
-        let data = try await sendRawTCP(host: host, port: UInt16(port), payload: Data(requestString.utf8), timeout: timeout)
+        #if canImport(Network)
+        // 先尝试 WiFi 接口，失败后 fallback 到默认接口
+        do {
+            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: .wifi)
+            return try parseHTTPResponse(data, originalURL: url)
+        } catch {
+            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: nil)
+            return try parseHTTPResponse(data, originalURL: url)
+        }
+        #else
+        let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout)
         return try parseHTTPResponse(data, originalURL: url)
+        #endif
     }
 
     public func postFormRaw(
@@ -111,17 +123,29 @@ public final class DirectHTTPClient: Sendable {
         var payload = Data(headerStr.utf8)
         payload.append(body)
 
+        #if canImport(Network)
+        do {
+            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: .wifi)
+            return try parseHTTPResponse(data, originalURL: url)
+        } catch {
+            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: nil)
+            return try parseHTTPResponse(data, originalURL: url)
+        }
+        #else
         let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout)
         return try parseHTTPResponse(data, originalURL: url)
+        #endif
     }
 
     // MARK: - Platform-specific raw TCP
 
     #if canImport(Network)
-    private func sendRawTCP(host: String, port: UInt16, payload: Data, timeout: TimeInterval) async throws -> Data {
+    private func sendRawTCP(host: String, port: UInt16, payload: Data, timeout: TimeInterval, interfaceType: NWInterface.InterfaceType?) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             let parameters = NWParameters.tcp
-            parameters.requiredInterfaceType = .wifi
+            if let ifType = interfaceType {
+                parameters.requiredInterfaceType = ifType
+            }
 
             let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: parameters)
             let queue = DispatchQueue(label: "com.jzy.HUSTCampus.rawhttp")
@@ -271,17 +295,20 @@ public final class DirectHTTPClient: Sendable {
     // MARK: - HTTP Response Parser
 
     private func parseHTTPResponse(_ data: Data, originalURL: URL) throws -> (Data, HTTPURLResponse) {
-        guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
-            throw AutologinError.invalidResponse("无法解码响应")
-        }
-        guard let headerEnd = text.range(of: "\r\n\r\n") else {
+        // 字节级查找 \r\n\r\n 分隔头和体
+        let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+        guard let separatorRange = data.firstRange(of: Data(separator)) else {
             throw AutologinError.invalidResponse("无法解析 HTTP 响应头")
         }
-        let headerPart = String(text[text.startIndex..<headerEnd.lowerBound])
-        let bodyPart = String(text[headerEnd.upperBound...])
-        let bodyData = bodyPart.data(using: .utf8) ?? Data()
 
-        let lines = headerPart.components(separatedBy: "\r\n")
+        let headerData = data[data.startIndex..<separatorRange.lowerBound]
+        var bodyData = data[separatorRange.upperBound...]
+
+        guard let headerStr = String(data: headerData, encoding: .utf8) ?? String(data: headerData, encoding: .isoLatin1) else {
+            throw AutologinError.invalidResponse("无法解码响应头")
+        }
+
+        let lines = headerStr.components(separatedBy: "\r\n")
         guard let statusLine = lines.first else {
             throw AutologinError.invalidResponse("空响应")
         }
@@ -293,9 +320,24 @@ public final class DirectHTTPClient: Sendable {
         var headerFields: [String: String] = [:]
         for line in lines.dropFirst() {
             if let colonIndex = line.firstIndex(of: ":") {
-                let key = String(line[line.startIndex..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                let key = String(line[line.startIndex..<colonIndex]).trimmingCharacters(in: .whitespaces).lowercased()
                 let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
                 headerFields[key] = value
+            }
+        }
+
+        // 处理 chunked 编码
+        if headerFields["transfer-encoding"]?.lowercased().contains("chunked") == true {
+            bodyData = dechunk(Data(bodyData))[...]
+        }
+
+        // 构建 HTTPURLResponse 时用原始大小写的 header
+        var responseHeaders: [String: String] = [:]
+        for line in lines.dropFirst() {
+            if let colonIndex = line.firstIndex(of: ":") {
+                let key = String(line[line.startIndex..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                responseHeaders[key] = value
             }
         }
 
@@ -303,9 +345,42 @@ public final class DirectHTTPClient: Sendable {
             url: originalURL,
             statusCode: statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: headerFields
+            headerFields: responseHeaders
         )!
-        return (bodyData, response)
+        return (Data(bodyData), response)
+    }
+
+    /// 解码 chunked transfer encoding
+    private func dechunk(_ data: Data) -> Data {
+        var result = Data()
+        var offset = 0
+        let bytes = [UInt8](data)
+
+        while offset < bytes.count {
+            // 找到 chunk size 行的结尾 \r\n
+            var lineEnd = offset
+            while lineEnd < bytes.count - 1 {
+                if bytes[lineEnd] == 0x0D && bytes[lineEnd + 1] == 0x0A {
+                    break
+                }
+                lineEnd += 1
+            }
+            guard lineEnd < bytes.count - 1 else { break }
+
+            let sizeStr = String(bytes: bytes[offset..<lineEnd], encoding: .utf8)?.trimmingCharacters(in: .whitespaces) ?? ""
+            guard let chunkSize = UInt(sizeStr, radix: 16) else { break }
+            if chunkSize == 0 { break }
+
+            let chunkStart = lineEnd + 2
+            let chunkEnd = chunkStart + Int(chunkSize)
+            guard chunkEnd <= bytes.count else { break }
+
+            result.append(contentsOf: bytes[chunkStart..<chunkEnd])
+            // 跳过 chunk 数据后的 \r\n
+            offset = chunkEnd + 2
+        }
+
+        return result
     }
 }
 

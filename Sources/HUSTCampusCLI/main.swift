@@ -1,6 +1,11 @@
 import ArgumentParser
 import Foundation
 import HUSTCampusCore
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 @main
 struct HUSTAutologin: AsyncParsableCommand {

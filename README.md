@@ -10,7 +10,7 @@
 - 支持 `pageInfo` 公钥加密流程 + HUST 旧版 RSA 加密 fallback
 - 使用 Network.framework 绑定 WiFi 物理接口，绕过 TUN/VPN 代理
 - 定时探测（默认 30 秒），断线自动重连
-- 密码本地加密存储，不使用 Keychain（避免未签名 app 反复弹授权）
+- 密码本地混淆存储（XOR + Base64），避免明文落盘。注意这不是强加密，主要防止意外泄露
 - 日志写入 `~/Library/Logs/HUSTCampusMenuBar/watch.log`，自动轮转（5MB）
 
 ## 系统要求

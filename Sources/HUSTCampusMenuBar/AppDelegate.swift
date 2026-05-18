@@ -205,6 +205,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let appleScript = NSAppleScript(source: script) {
                 var error: NSDictionary?
                 appleScript.executeAndReturnError(&error)
+                if let error = error {
+                    let msg = error[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    if msg.contains("assistive") || msg.contains("accessibility") {
+                        DispatchQueue.main.async {
+                            AppLogger.shared.warning("无法关闭认证弹窗：需要辅助功能权限。请前往 系统设置 → 隐私与安全性 → 辅助功能，添加本 app。")
+                        }
+                    }
+                }
             }
         }
     }
