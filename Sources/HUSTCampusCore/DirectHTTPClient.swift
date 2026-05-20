@@ -86,9 +86,9 @@ public final class DirectHTTPClient: Sendable {
         let payload = Data(requestString.utf8)
 
         #if canImport(Network)
-        // 先尝试 WiFi 接口，失败后 fallback 到默认接口
+        // 先尝试有线接口，失败后 fallback 到默认接口
         do {
-            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: .wifi)
+            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: .wiredEthernet)
             return try parseHTTPResponse(data, originalURL: url)
         } catch {
             let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: nil)
@@ -125,7 +125,7 @@ public final class DirectHTTPClient: Sendable {
 
         #if canImport(Network)
         do {
-            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: .wifi)
+            let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: .wiredEthernet)
             return try parseHTTPResponse(data, originalURL: url)
         } catch {
             let data = try await sendRawTCP(host: host, port: UInt16(port), payload: payload, timeout: timeout, interfaceType: nil)

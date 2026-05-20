@@ -7,7 +7,7 @@
 - 自动检测校园网 captive portal 并完成登录，全程无需手动操作
 - 支持 `pageInfo` 公钥加密流程 + HUST 旧版 RSA 加密 fallback
 - 定时探测（默认 30 秒），断线自动重连
-- 密码本地混淆存储（XOR + Base64），不是强加密但能避免明文落盘
+- Swift CLI 密码本地混淆存储（XOR + Base64）；Bash 版使用 0600 权限配置文件保存 Base64 字段，避免特殊字符破坏配置，但不是强加密
 
 ## 三种使用方式
 
@@ -66,25 +66,26 @@ open "dist/HUST Campus Autologin.app"
 
 ## Linux Bash 脚本版（推荐服务器使用）
 
-无需 Swift，只需要 `curl`、`openssl`、`python3`（Ubuntu 都自带）。
+无需 Swift，只需要 `curl`、`python3`（Ubuntu 通常自带）。
 
 ### 安装
 
 ```bash
-curl -O https://raw.githubusercontent.com/illfen/HUSTCampusMenuBar/main/scripts/hust-autologin.sh
-chmod +x hust-autologin.sh
+mkdir -p ~/.local/bin
+curl -o ~/.local/bin/hust-autologin.sh https://raw.githubusercontent.com/illfen/HUSTCampusMenuBar/main/scripts/hust-autologin.sh
+chmod +x ~/.local/bin/hust-autologin.sh
 ```
 
 ### 使用
 
 ```bash
-./hust-autologin.sh init     # 初始化（输入学号和密码）
-./hust-autologin.sh status   # 检测网络状态
-./hust-autologin.sh login    # 立即登录一次
-./hust-autologin.sh watch    # 后台守护（默认命令）
+~/.local/bin/hust-autologin.sh init     # 初始化（输入学号和密码）
+~/.local/bin/hust-autologin.sh status   # 检测网络状态
+~/.local/bin/hust-autologin.sh login    # 立即登录一次
+~/.local/bin/hust-autologin.sh watch    # 后台守护（默认命令）
 ```
 
-配置文件：`~/.config/hust-autologin/config`（权限 600）
+配置文件：`~/.config/hust-autologin/config`（权限 600；Base64 不是加密）
 日志文件：`~/.local/state/hust-autologin/watch.log`
 
 ### 配 systemd 用户服务（开机自启）
@@ -98,7 +99,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/hust-autologin.sh watch
+ExecStart=%h/.local/bin/hust-autologin.sh watch
 Restart=on-failure
 RestartSec=10
 
